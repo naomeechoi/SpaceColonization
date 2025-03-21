@@ -1,5 +1,5 @@
 // main.js
-
+//git test
 const { mat4 } = glMatrix;
 if (!mat4) {
   console.error("glMatrix is not loaded correctly.");
