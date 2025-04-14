@@ -5,3 +5,17 @@ body {
   height: 100%;
   overflow: hidden; /* 스크롤을 없애기 */
 }
+
+#fpsDisplay {
+  position: fixed;
+  top: 10px;
+  left: 10px;
+  color: #0f0;
+  font-family: monospace;
+  font-size: 14px;
+  background-color: rgba(0, 0, 0, 0.5);
+  padding: 4px 8px;
+  border-radius: 4px;
+  z-index: 10;
+  pointer-events: none;
+}
