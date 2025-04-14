@@ -1,21 +1,61 @@
 import * as helper from "./lib/helper.js";
-let attractionPositions;
+
+let grid = new Map();
 let findAttPosRange = 10;
 let extendLegth = 20;
 let minAttraPosDist = 0.001;
-let prevAtt = 0;
+let pointIdCounter = 0;
+const CELL_SIZE = 0.006; // findAttPosRange랑 유사한 크기면 적절
+
+function getGridKey(pos) {
+  const x = Math.floor(pos.x / CELL_SIZE);
+  const y = Math.floor(pos.y / CELL_SIZE);
+  const z = Math.floor(pos.z / CELL_SIZE);
+  return `${x}_${y}_${z}`;
+}
+
+function insertToGrid(point) {
+  const key = getGridKey(point);
+  if (!grid.has(key)) grid.set(key, []);
+  grid.get(key).push(point);
+}
+
+function removeFromGrid(point) {
+  const key = getGridKey(point);
+  const cell = grid.get(key);
+  if (!cell) return;
+  const index = cell.findIndex((p) => p._id === point._id);
+  if (index !== -1) cell.splice(index, 1);
+  if (cell.length === 0) grid.delete(key);
+}
+
+function getSurroundingKeys(pos, radius) {
+  const r = Math.ceil(radius / CELL_SIZE);
+  const cx = Math.floor(pos.x / CELL_SIZE);
+  const cy = Math.floor(pos.y / CELL_SIZE);
+  const cz = Math.floor(pos.z / CELL_SIZE);
+  let keys = [];
+
+  for (let dx = -r; dx <= r; dx++) {
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dz = -r; dz <= r; dz++) {
+        keys.push(`${cx + dx}_${cy + dy}_${cz + dz}`);
+      }
+    }
+  }
+  return keys;
+}
 
 export function initailizeAttractinoPoints(xLimit_, yLimit_, count_) {
-  attractionPositions = new Map();
-  const xRange = 1.5;
-  const yRange = 0.8;
-
+  grid.clear();
   for (let i = 0; i < count_; i++) {
-    attractionPositions.set(i, {
-      x: helper.getRandomFloat(0, xLimit_) * ((2 * xRange) / xLimit_) - xRange,
-      y: helper.getRandomFloat(0, yLimit_) * ((2 * yRange) / yLimit_) - yRange,
+    const point = {
+      x: helper.getRandomFloat(0, xLimit_) * ((2 * 1.5) / xLimit_) - 1.5,
+      y: helper.getRandomFloat(0, yLimit_) * ((2 * 0.8) / yLimit_) - 0.8,
       z: 0.0,
-    });
+      _id: pointIdCounter++,
+    };
+    insertToGrid(point);
   }
 }
 
@@ -32,109 +72,115 @@ export function setMinAttraPosDist(minAttraPosDist_) {
 }
 
 export function getAttractionPositions() {
-  let flatArray = [];
-  attractionPositions.forEach(({ x, y, z }) => {
-    flatArray.push(x, y, z);
-  });
+  const positions = [];
 
-  return new Float32Array(flatArray);
-}
-
-export function deleteCloseAttractionPos(usedAttractionPos_, dir_) {
-  let keysToDelete = [];
-  usedAttractionPos_.forEach((value, key) => {
-    if (helper.getDistanceVectors(value, dir_) <= minAttraPosDist) {
-      keysToDelete.push(key);
+  for (const points of grid.values()) {
+    for (const p of points) {
+      positions.push(p.x, p.y, p.z);
     }
-  });
+  }
 
-  keysToDelete.forEach((key) => attractionPositions.delete(key));
+  return new Float32Array(positions);
 }
 
-export function forceDeleteCloseAttractionPos(key_) {
-  attractionPositions.delete(key_);
-}
-
-export function getExtendPosition(position, normal) {
+export function getExtendPosition(position) {
   let dir = { x: 0.0, y: 0.0, z: 0.0 };
-  let usedAttractionPos = new Map();
-
+  let usedPoints = [];
+  let closestValue = null;
   let closestDist = Infinity;
   let closestKey = null;
-  let closestValue = null;
 
-  attractionPositions.forEach((value, key) => {
-    const dist = helper.getDistanceVectors(value, position);
+  // 1️⃣ 처음 탐색 범위
+  let searchRange = findAttPosRange;
+  const maxSearchIterations = 3; // 점점 넓혀서 3단계까지 시도
+  let found = false;
 
-    if (dist <= findAttPosRange) {
-      usedAttractionPos.set(key, value);
+  for (let level = 0; level < maxSearchIterations && !found; level++) {
+    const keys = getSurroundingKeys(position, searchRange);
+
+    for (const key of keys) {
+      const points = grid.get(key);
+      if (!points) continue;
+
+      for (const p of points) {
+        const dist = helper.getDistanceVectors(p, position);
+        if (dist <= searchRange) {
+          dir.x += p.x - position.x;
+          dir.y += p.y - position.y;
+          dir.z += p.z - position.z;
+          usedPoints.push(p);
+          found = true;
+        }
+
+        // fallback용 가장 가까운 점
+        if (dist < closestDist) {
+          closestDist = dist;
+          closestValue = p;
+          closestKey = key;
+        }
+      }
+    }
+
+    // 2️⃣ 못 찾았으면 탐색 범위 확장
+    if (!found) {
+      searchRange *= 2.0;
+    }
+  }
+
+  // 3️⃣ 포인트 없으면 가까운 N개로 방향 결정
+  if (usedPoints.length === 0) {
+    if (grid.size === 0) return position;
+
+    const allPoints = [];
+    for (const [key, pointList] of grid) {
+      for (const p of pointList) {
+        const dist = helper.getDistanceVectors(p, position);
+        allPoints.push({ key, value: p, dist });
+      }
+    }
+
+    allPoints.sort((a, b) => a.dist - b.dist);
+    const topN = allPoints.slice(0, 10);
+
+    for (const { value } of topN) {
       dir.x += value.x - position.x;
       dir.y += value.y - position.y;
       dir.z += value.z - position.z;
     }
-
-    if (dist < closestDist) {
-      closestDist = dist;
-      closestKey = key;
-      closestValue = value;
-    }
-  });
-
-  if (usedAttractionPos.size === 0) {
-    if (attractionPositions.size === 0) return position;
-
-    let distances = [];
-    attractionPositions.forEach((value, key) => {
-      const dist = helper.getDistanceVectors(value, position);
-      distances.push({ key, value, dist });
-    });
-
-    distances.sort((a, b) => a.dist - b.dist);
-    const topN = distances.slice(0, 10); // 가까운 10개만 사용
-
-    dir = { x: 0.0, y: 0.0, z: 0.0 };
-    topN.forEach(({ value }) => {
-      dir.x += value.x - position.x;
-      dir.y += value.y - position.y;
-      dir.z += value.z - position.z;
-    });
 
     dir.x /= topN.length;
     dir.y /= topN.length;
     dir.z /= topN.length;
   } else {
-    dir.x /= usedAttractionPos.size;
-    dir.y /= usedAttractionPos.size;
-    dir.z /= usedAttractionPos.size;
+    dir.x /= usedPoints.length;
+    dir.y /= usedPoints.length;
+    dir.z /= usedPoints.length;
   }
 
   helper.normalize(dir);
 
-  // 방향이 너무 작으면 fallback
-  const isDirTooSmall =
-    Math.abs(dir.x) < 0.0001 &&
-    Math.abs(dir.y) < 0.0001 &&
-    Math.abs(dir.z) < 0.0001;
-
-  /*if (isDirTooSmall && closestValue !== null) {
-    dir.x = closestValue.x - position.x;
-    dir.y = closestValue.y - position.y;
-    dir.z = closestValue.z - position.z;
-    helper.normalize(dir);
-
-    console.log(closestValue.x, closestValue.y);
-    usedAttractionPos.set(closestKey, closestValue);
-    forceDeleteCloseAttractionPos(closestKey);
-  }*/
-
+  // 4️⃣ 이동 및 예외 처리
   const prevPosition = { ...position };
-  position.x += dir.x * extendLegth;
-  position.y += dir.y * extendLegth;
-  position.z += dir.z * extendLegth;
+  let newPos = {
+    x: position.x + dir.x * extendLegth,
+    y: position.y + dir.y * extendLegth,
+    z: position.z + dir.z * extendLegth,
+  };
 
-  // 너무 안 움직였으면 살짝 더 멀리까지 반복적으로 이동
-  let magnitude = helper.getDistanceVectors(prevPosition, position);
-  const minMagnitude = 0.001;
+  /*
+  const noiseStrength = 0.02; // 조정 가능
+  const noiseVec = {
+    x: (Math.random() - 0.5) * noiseStrength,
+    y: (Math.random() - 0.5) * noiseStrength,
+    z: (Math.random() - 0.5) * noiseStrength,
+  };
+
+  newPos.x += noiseVec.x;
+  newPos.y += noiseVec.y;
+  newPos.z += noiseVec.z;*/
+
+  let magnitude = helper.getDistanceVectors(prevPosition, newPos);
+  const minMagnitude = 0.002;
   let retryCount = 0;
   const maxRetries = 10;
   const scaleFactor = 1.01;
@@ -143,27 +189,30 @@ export function getExtendPosition(position, normal) {
     dir.x *= scaleFactor;
     dir.y *= scaleFactor;
     dir.z *= scaleFactor;
-
-    position.x = prevPosition.x + dir.x;
-    position.y = prevPosition.y + dir.y;
-    position.z = prevPosition.z + dir.z;
-
-    magnitude = helper.getDistanceVectors(prevPosition, position);
+    newPos = {
+      x: prevPosition.x + dir.x,
+      y: prevPosition.y + dir.y,
+      z: prevPosition.z + dir.z,
+    };
+    magnitude = helper.getDistanceVectors(prevPosition, newPos);
     retryCount++;
   }
 
-  // fallback: 그래도 이동 거리가 너무 작으면 가장 가까운 attraction point로 이동
   if (magnitude < minMagnitude && closestValue !== null) {
     console.warn("Fallback to closest attraction point");
-    position.x = closestValue.x;
-    position.y = closestValue.y;
-    position.z = closestValue.z;
-    usedAttractionPos.set(closestKey, closestValue);
-    console.log(2);
+    newPos = {
+      x: closestValue.x,
+      y: closestValue.y,
+      z: closestValue.z,
+    };
   }
 
-  // attraction point 제거
-  deleteCloseAttractionPos(usedAttractionPos, position);
+  // 5️⃣ attraction point 제거
+  for (const p of usedPoints) {
+    if (helper.getDistanceVectors(p, newPos) < minAttraPosDist) {
+      removeFromGrid(p);
+    }
+  }
 
-  return position;
+  return newPos;
 }

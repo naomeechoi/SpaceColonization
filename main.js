@@ -1,309 +1,244 @@
-// main.js
-//git test
 import * as helper from "./lib/helper.js";
 import * as spaceColonization from "./spaceColonization.js";
 const { mat4 } = glMatrix;
-if (!mat4) {
-  console.error("glMatrix is not loaded correctly.");
-} else {
-  console.log("glMatrix loaded successfully.");
-}
+
+let shaderProgram, attractionShaderProgram;
+let buffer, attractionBuffer;
+
+const branches = []; // [[x0, y0, z0, x1, y1, z1, ...], [...], ...]
+let attractionPoints = new Float32Array();
+let lastFrameTime = 0;
+let growthStartIndex = 0; // ✅ 순환 처리용 인덱스
 
 const vertexShaderSource = `
-    attribute vec3 position;
-    uniform float pointSize;
-    uniform mat4 projectionMatrix;
-    uniform mat4 modelViewMatrix;
-    void main() {
-        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        gl_PointSize = pointSize;
-    }
+  attribute vec3 position;
+  uniform float pointSize;
+  uniform mat4 projectionMatrix;
+  uniform mat4 modelViewMatrix;
+
+  void main() {
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    gl_PointSize = pointSize;
+  }
 `;
 
 const fragmentShaderSource = `
-    precision mediump float;
-    void main() {
-        gl_FragColor = vec4(1.0, 1.0, 1.0, 1.0); // 흰색 라인
-    }
-`;
-
-const attractionVertexShaderSource = `
-    attribute vec3 position;
-    uniform float pointSize;
-    uniform mat4 projectionMatrix;
-    uniform mat4 modelViewMatrix;
-    void main() {
-        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        gl_PointSize = pointSize;
-    }
+  precision mediump float;
+  void main() {
+    gl_FragColor = vec4(1.0); // 가지는 흰색
+  }
 `;
 
 const attractionFragmentShaderSource = `
-    precision mediump float;
-    void main() {
-        gl_FragColor = vec4(0.0, 1.0, 1.0, 1.0); // 흰색 라인
-    }
+  precision mediump float;
+  void main() {
+    gl_FragColor = vec4(0.0, 1.0, 1.0, 1.0); // 어트랙션 포인트는 시안색
+  }
 `;
 
-let shaderProgram;
-let attractionShaderProgram;
-let attractionBuffer;
-// 선을 그리기 위한 두 점
-var vertexArray = [0.0, -1.0, 0.0, 0.0, -0.8, 0.0];
+window.onload = () => {
+  const canvas = document.getElementById("mainCanvas");
+  const gl = canvas.getContext("webgl");
+  if (!gl) return alert("WebGL not supported");
 
-let position = { x: 0.0, y: -0.8, z: 0.0 };
-let lastTime = 0;
-const fps = 60;
-
-window.onload = function () {
-  var canvas = document.getElementById("mainCanvas");
-
-  function resizeCanvas() {
-    canvas.width = window.innerWidth;
-    canvas.height = window.innerHeight;
-  }
-
-  resizeCanvas();
-  window.addEventListener("resize", resizeCanvas);
-
-  var gl = canvas.getContext("webgl");
-  if (!gl) {
-    console.log("WebGL not supported, falling back on experimental-webgl");
-    gl = canvas.getContext("experimental-webgl");
-  }
-  if (!gl) {
-    alert("Your browser does not support WebGL");
-  }
+  resizeCanvas(canvas, gl);
+  window.addEventListener("resize", () => resizeCanvas(canvas, gl));
 
   gl.enable(gl.DEPTH_TEST);
-  gl.depthFunc(gl.LEQUAL);
-  gl.clearColor(0.0, 0.0, 0.0, 1.0);
-  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  gl.clearColor(0, 0, 0, 1);
 
-  const buffer = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
-
-  attractionBuffer = gl.createBuffer();
-
-  // 셰이더 생성
-  const vertexShader = createShader(gl, gl.VERTEX_SHADER, vertexShaderSource);
-  const fragmentShader = createShader(
+  shaderProgram = createProgram(gl, vertexShaderSource, fragmentShaderSource);
+  attractionShaderProgram = createProgram(
     gl,
-    gl.FRAGMENT_SHADER,
-    fragmentShaderSource
+    vertexShaderSource,
+    attractionFragmentShaderSource
   );
 
-  // 셰이더 프로그램 생성
-  shaderProgram = createProgram(gl, vertexShader, fragmentShader);
-  ``;
+  buffer = gl.createBuffer();
+  attractionBuffer = gl.createBuffer();
 
-  // position 속성 위치 찾기
-  const positionLocation = gl.getAttribLocation(shaderProgram, "position");
-  gl.enableVertexAttribArray(positionLocation);
-  gl.vertexAttribPointer(positionLocation, 3, gl.FLOAT, false, 0, 0);
-
-  const pointSizeLocation = gl.getUniformLocation(shaderProgram, "pointSize");
-  gl.uniform1f(pointSizeLocation, 10.0);
-
-  // projectionMatrix 설정
   const projectionMatrix = mat4.create();
   mat4.perspective(
     projectionMatrix,
-    Math.PI / 4, // 45도
-    canvas.width / canvas.height, // 종횡비
-    0.1, // 근거리 클리핑
-    100.0 // 원거리 클리핑
+    Math.PI / 4,
+    canvas.width / canvas.height,
+    0.1,
+    100.0
   );
 
-  // 모델뷰 매트릭스 설정
   const modelViewMatrix = mat4.create();
-  mat4.translate(modelViewMatrix, modelViewMatrix, [0, 0, -2]); // 카메라 뒤로 이동
+  mat4.translate(modelViewMatrix, modelViewMatrix, [0, 0, -2]);
 
-  // uniform으로 매트릭스 전달
-  const projectionMatrixLocation = gl.getUniformLocation(
+  setupShaderUniforms(
+    gl,
     shaderProgram,
-    "projectionMatrix"
+    projectionMatrix,
+    modelViewMatrix,
+    2.0
   );
-  gl.uniformMatrix4fv(projectionMatrixLocation, false, projectionMatrix);
-
-  const modelViewMatrixLocation = gl.getUniformLocation(
-    shaderProgram,
-    "modelViewMatrix"
+  setupShaderUniforms(
+    gl,
+    attractionShaderProgram,
+    projectionMatrix,
+    modelViewMatrix,
+    5.0
   );
-  gl.uniformMatrix4fv(modelViewMatrixLocation, false, modelViewMatrix);
 
-  attractionShaderProgram = createAttractionPointerShader(gl, canvas);
+  branches.push([0.0, -1.0, 0.0, 0.0, -0.8, 0.0]);
 
   spaceColonization.initailizeAttractinoPoints(
     canvas.width,
     canvas.height,
     4000
   );
-  spaceColonization.setRange(0.07);
-  spaceColonization.setExtendLength(0.1);
+  spaceColonization.setRange(0.08);
+  spaceColonization.setExtendLength(0.06);
   spaceColonization.setMinAttraPosDist(0.05);
 
-  requestAnimationFrame(function (time) {
-    updateAndRender(gl, buffer, time);
-  });
+  requestAnimationFrame((t) => renderLoop(gl, t));
 };
 
-function updateAndRender(gl, buffer, time) {
-  let deltaTime = time - lastTime;
+function renderLoop(gl, time) {
+  const delta = time - lastFrameTime;
+  const fps = 60;
+  const interval = 1000 / fps;
 
-  if (deltaTime > 1000 / fps) {
-    // FPS를 30으로 제한
-    lastTime = time;
+  if (delta < interval) {
+    requestAnimationFrame((t) => renderLoop(gl, t));
+    return;
+  }
+  lastFrameTime = time;
 
-    gl.clearColor(0.0, 0.0, 0.0, 1.0); // 검은색 배경
-    gl.clearDepth(1.0); // 깊이 버퍼도 초기화
-    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
-    gl.useProgram(shaderProgram);
-    // spaceColonization 함수에서 새로운 포지션을 받아옴
-    let newPosition = spaceColonization.getExtendPosition(position, true);
-    const newVertexArray = new Float32Array(vertexArray.length + 3);
-    newVertexArray.set(vertexArray);
-    newVertexArray.set(
-      [newPosition.x, newPosition.y, newPosition.z],
-      vertexArray.length
-    );
-    vertexArray = newVertexArray;
+  const newBranches = [];
+  const totalBranches = branches.length;
+  const MAX_GROWTH_PER_FRAME = 40;
+  let growthCount = 0;
 
-    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
-    if (
-      vertexArray.byteLength >
-      gl.getBufferParameter(gl.ARRAY_BUFFER, gl.BUFFER_SIZE)
-    ) {
-      gl.bufferData(gl.ARRAY_BUFFER, vertexArray, gl.DYNAMIC_DRAW);
-    } else {
-      gl.bufferSubData(gl.ARRAY_BUFFER, 0, vertexArray);
+  for (
+    let i = 0;
+    i < totalBranches && growthCount < MAX_GROWTH_PER_FRAME;
+    i++
+  ) {
+    const index = (growthStartIndex + i) % totalBranches;
+    const branch = branches[index];
+    const branchLength = branch.length / 3;
+
+    if (branchLength >= 40) continue;
+
+    const last = branch.slice(-3);
+    const next = spaceColonization.getExtendPosition({
+      x: last[0],
+      y: last[1],
+      z: last[2],
+    });
+
+    if (next.x !== last[0] || next.y !== last[1] || next.z !== last[2]) {
+      branch.push(next.x, next.y, next.z);
+
+      if (branchLength >= 20 && Math.random() < 0.5) {
+        const split = spaceColonization.getExtendPosition(next);
+        if (split.x !== next.x || split.y !== next.y || split.z !== next.z) {
+          newBranches.push([next.x, next.y, next.z, split.x, split.y, split.z]);
+        }
+      }
+      growthCount++;
     }
-
-    // 선 그리기
-    gl.drawArrays(gl.LINE_STRIP, 0, vertexArray.length / 3);
-
-    gl.useProgram(attractionShaderProgram);
-    /*
-    gl.bindBuffer(gl.ARRAY_BUFFER, attractionBuffer);*/
-    let tempArray = spaceColonization.getAttractionPositions();
-    gl.bufferData(
-      gl.ARRAY_BUFFER,
-      tempArray.length === 0 ? new Float32Array() : tempArray,
-      gl.DYNAMIC_DRAW
-    );
-
-    //const posLoc = gl.getAttribLocation(attractionShaderProgram, "position");
-
-    //gl.enableVertexAttribArray(posLoc);
-    //gl.vertexAttribPointer(posLoc, 3, gl.FLOAT, false, 0, 0);
-    /*if (
-      vertexArray.byteLength >
-      gl.getBufferParameter(gl.ARRAY_BUFFER, gl.BUFFER_SIZE)
-    ) {
-      gl.bufferData(gl.ARRAY_BUFFER, vertexArray, gl.DYNAMIC_DRAW);
-    } else {
-      gl.bufferSubData(gl.ARRAY_BUFFER, 0, vertexArray);
-    }*/
-    // 선 그리기
-    //console.log(tempArray.length / 3);
-    gl.drawArrays(gl.POINTS, 0, tempArray.length / 3);
-
-    position = newPosition;
-    //console.log(position.x + ", " + position.y + ", ");
   }
 
-  // 다음 프레임을 요청하여 계속해서 업데이트
-  requestAnimationFrame((timestamp) => updateAndRender(gl, buffer, timestamp));
+  growthStartIndex = (growthStartIndex + MAX_GROWTH_PER_FRAME) % totalBranches;
+  branches.push(...newBranches);
+
+  // 가지 버퍼 업데이트
+  const lineVertices = [];
+  for (const branch of branches) {
+    for (let i = 0; i < branch.length - 3; i += 3) {
+      lineVertices.push(
+        branch[i],
+        branch[i + 1],
+        branch[i + 2],
+        branch[i + 3],
+        branch[i + 4],
+        branch[i + 5]
+      );
+    }
+  }
+
+  gl.useProgram(shaderProgram);
+  gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+  gl.bufferData(
+    gl.ARRAY_BUFFER,
+    new Float32Array(lineVertices),
+    gl.DYNAMIC_DRAW
+  );
+  const posLoc = gl.getAttribLocation(shaderProgram, "position");
+  gl.enableVertexAttribArray(posLoc);
+  gl.vertexAttribPointer(posLoc, 3, gl.FLOAT, false, 0, 0);
+  gl.drawArrays(gl.LINES, 0, lineVertices.length / 3);
+
+  // 어트랙션 포인트
+  gl.useProgram(attractionShaderProgram);
+  attractionPoints = spaceColonization.getAttractionPositions();
+  gl.bindBuffer(gl.ARRAY_BUFFER, attractionBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, attractionPoints, gl.DYNAMIC_DRAW);
+  const aPosLoc = gl.getAttribLocation(attractionShaderProgram, "position");
+  gl.enableVertexAttribArray(aPosLoc);
+  gl.vertexAttribPointer(aPosLoc, 3, gl.FLOAT, false, 0, 0);
+  gl.drawArrays(gl.POINTS, 0, attractionPoints.length / 3);
+
+  requestAnimationFrame((t) => renderLoop(gl, t));
 }
 
-// 쉐이더 생성
-function createShader(gl, type, source) {
-  var shader = gl.createShader(type);
-  gl.shaderSource(shader, source);
+function resizeCanvas(canvas, gl) {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+  gl.viewport(0, 0, canvas.width, canvas.height);
+}
+
+function createShader(gl, type, src) {
+  const shader = gl.createShader(type);
+  gl.shaderSource(shader, src);
   gl.compileShader(shader);
-
-  var success = gl.getShaderParameter(shader, gl.COMPILE_STATUS);
-  if (success) return shader;
-
-  console.log(gl.getShaderInfoLog(shader));
-  gl.deleteShader(shader);
+  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+    console.error(gl.getShaderInfoLog(shader));
+    gl.deleteShader(shader);
+    return null;
+  }
+  return shader;
 }
 
-function createProgram(gl, vertexShader, fragmentShader) {
-  var program = gl.createProgram();
-  gl.attachShader(program, vertexShader);
-  gl.attachShader(program, fragmentShader);
+function createProgram(gl, vSrc, fSrc) {
+  const vs = createShader(gl, gl.VERTEX_SHADER, vSrc);
+  const fs = createShader(gl, gl.FRAGMENT_SHADER, fSrc);
+  const program = gl.createProgram();
+  gl.attachShader(program, vs);
+  gl.attachShader(program, fs);
   gl.linkProgram(program);
-
   if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-    console.error("ERROR linking program", gl.getProgramInfoLog(program));
-    return;
+    console.error(gl.getProgramInfoLog(program));
+    return null;
   }
-  gl.validateProgram(program);
-  if (!gl.getProgramParameter(program, gl.VALIDATE_STATUS)) {
-    console.error("ERROR validating program", gl.getProgramInfoLog(program));
-    return;
-  }
-  gl.useProgram(program);
   return program;
 }
 
-function createAttractionPointerShader(gl, canvas) {
-  // 셰이더 생성
-  const attVertexShader = createShader(
-    gl,
-    gl.VERTEX_SHADER,
-    attractionVertexShaderSource
+function setupShaderUniforms(
+  gl,
+  program,
+  projectionMatrix,
+  modelViewMatrix,
+  pointSize
+) {
+  gl.useProgram(program);
+  gl.uniformMatrix4fv(
+    gl.getUniformLocation(program, "projectionMatrix"),
+    false,
+    projectionMatrix
   );
-  const attFragmentShader = createShader(
-    gl,
-    gl.FRAGMENT_SHADER,
-    attractionFragmentShaderSource
+  gl.uniformMatrix4fv(
+    gl.getUniformLocation(program, "modelViewMatrix"),
+    false,
+    modelViewMatrix
   );
-
-  // 셰이더 프로그램 생성
-  let tempAttractionShaderProgram = createProgram(
-    gl,
-    attVertexShader,
-    attFragmentShader
-  );
-
-  // position 속성 위치 찾기
-  const positionLocation = gl.getAttribLocation(
-    tempAttractionShaderProgram,
-    "position"
-  );
-  gl.enableVertexAttribArray(positionLocation);
-  gl.vertexAttribPointer(positionLocation, 3, gl.FLOAT, false, 0, 0);
-  const pointSizeLocation = gl.getUniformLocation(
-    tempAttractionShaderProgram,
-    "pointSize"
-  );
-  gl.uniform1f(pointSizeLocation, 5.0);
-  // projectionMatrix 설정
-  const projectionMatrix = mat4.create();
-  mat4.perspective(
-    projectionMatrix,
-    Math.PI / 4, // 45도
-    canvas.width / canvas.height, // 종횡비
-    0.1, // 근거리 클리핑
-    100.0 // 원거리 클리핑
-  );
-  // 모델뷰 매트릭스 설정
-  const modelViewMatrix = mat4.create();
-  mat4.translate(modelViewMatrix, modelViewMatrix, [0, 0, -2]); // 카메라 뒤로
-  // uniform으로 매트릭스 전달
-  const projectionMatrixLocation = gl.getUniformLocation(
-    tempAttractionShaderProgram,
-    "projectionMatrix"
-  );
-  gl.uniformMatrix4fv(projectionMatrixLocation, false, projectionMatrix);
-  const modelViewMatrixLocation = gl.getUniformLocation(
-    tempAttractionShaderProgram,
-    "modelViewMatrix"
-  );
-  gl.uniformMatrix4fv(modelViewMatrixLocation, false, modelViewMatrix);
-
-  return tempAttractionShaderProgram;
+  gl.uniform1f(gl.getUniformLocation(program, "pointSize"), pointSize);
 }
